@@ -1,0 +1,45 @@
+# 本地 AI 小说续写 —— 一键启动
+#
+# 用法：
+#   1) cp .env.example .env  并填入 DEEPSEEK_API_KEY（也可以留空，之后在网页「设置页」里填）
+#   2) docker compose up -d --build
+#   3) 前端 http://localhost:5173 ，接口文档 http://localhost:8000/docs
+#
+# 这里用 environment + ${VAR:-默认值} 的方式注入，而不是 env_file，
+# 好处是即使没有 .env 文件也能正常启动（Compose 会自动读取同目录 .env 做变量替换）。
+
+services:
+  backend:
+    build:
+      context: ./backend
+      args:
+        # 设为 1 可把本地中文向量模型（bge-small-zh）一起打进镜像，体积约 +2GB
+        INSTALL_EMBEDDINGS: "0"
+    container_name: novel-backend
+    environment:
+      DATA_DIR: /data
+      HOST: 0.0.0.0
+      PORT: "8000"
+      CORS_ORIGINS: "*"
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      FANQIE_MCP_COMMAND: ${FANQIE_MCP_COMMAND:-}
+      CANDIDATE_MODELS: ${CANDIDATE_MODELS:-deepseek-v4.1-flash,deepseek-v4.1-pro,deepseek-chat,deepseek-reasoner}
+    volumes:
+      - novel-data:/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: novel-frontend
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+    restart: unless-stopped
+
+volumes:
+  novel-data:

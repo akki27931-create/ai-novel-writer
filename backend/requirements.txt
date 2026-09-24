@@ -1,0 +1,31 @@
+# ---- 核心运行依赖（本地必装） ----
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+SQLAlchemy==2.0.36
+openai==1.59.6
+httpx==0.28.1
+python-multipart==0.0.20
+
+# ---- 向量数据库 ----
+# 说明：chromadb 0.5.x 在 Windows + Python 3.12 上需要 MSVC 编译 chroma-hnswlib，装不上；
+# 1.x 起已改为预编译 wheel，Windows / macOS / Linux 全平台可直接安装。
+# 若你的环境仍然装不上 chromadb，程序会自动降级为内置的文件向量库（见 services/vector_store.py），
+# 功能不受影响，只是检索性能略低。
+chromadb>=1.0.5,<2
+
+# ---- 小说导入解析 ----
+EbookLib==0.18
+beautifulsoup4==4.12.3
+lxml==5.3.0
+chardet==5.2.0
+
+# ---- 向量化兜底算法（纯本地、零模型） ----
+numpy==1.26.4
+
+# ---- 本地向量模型（可选，见 requirements-embeddings.txt） ----
+# sentence-transformers 会连带安装 PyTorch（体积较大）。
+# 如需最佳中文检索效果，请额外执行：
+#   pip install -r requirements-embeddings.txt
+# 未安装时系统会自动降级为内置的字符 n-gram 哈希向量检索，功能不受影响。

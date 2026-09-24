@@ -1,0 +1,24 @@
+# Git 换行/编码规则
+#
+# 背景：Windows 的 cmd.exe 必须用 CRLF 换行，否则 .bat 会被切碎、
+# 双击后黑窗口一闪就消失。这里强制保住换行符，避免重新 clone 后踩坑。
+
+* text=auto
+
+# 所有批处理都必须保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 启动.bat 是 GBK 编码 + CRLF，必须按二进制原样存取，不能让 git 做任何转换
+启动.bat -text
+
+# 二进制文件不做任何处理
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.woff binary
+*.woff2 binary

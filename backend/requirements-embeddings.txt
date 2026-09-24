@@ -1,0 +1,5 @@
+# 可选依赖：本地中文向量模型（推荐）
+# 安装后，EmbeddingService 会自动加载 BAAI/bge-small-zh-v1.5（首次运行自动下载约 100MB）。
+# 不安装时自动降级为内置字符 n-gram 哈希向量，RAG 仍可用，只是语义召回稍弱。
+sentence-transformers==3.3.1
+torch>=2.2.0

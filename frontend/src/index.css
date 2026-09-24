@@ -1,0 +1,60 @@
+/** 全局样式：Tailwind 三个指令 + 少量基础样式。 */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-slate-950 text-slate-200 antialiased;
+}
+
+/* 深色滚动条 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* 表单控件统一风格 */
+@layer components {
+  .input {
+    @apply w-full rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm text-slate-100
+      placeholder:text-slate-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500;
+  }
+  .label {
+    @apply mb-1 block text-xs font-medium text-slate-400;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-1 rounded-lg px-3 py-2 text-sm font-medium
+      transition disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-indigo-600 text-white hover:bg-indigo-500;
+  }
+  .btn-ghost {
+    @apply btn border border-slate-700 bg-slate-900 text-slate-200 hover:border-slate-500 hover:bg-slate-800;
+  }
+  .btn-danger {
+    @apply btn border border-rose-900 bg-rose-950/60 text-rose-300 hover:bg-rose-900/60;
+  }
+  .card {
+    @apply rounded-xl border border-slate-800 bg-slate-900 p-4;
+  }
+  .tag {
+    @apply inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium;
+  }
+}

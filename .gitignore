@@ -1,0 +1,32 @@
+# ---- 密钥与本地数据 ----
+.env
+.env.local
+backend/.env
+
+# ---- 本地数据（数据库 / 向量库 / 上传文件）----
+backend/data/
+data/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Node / 前端 ----
+node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
