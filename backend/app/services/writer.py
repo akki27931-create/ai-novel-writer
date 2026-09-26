@@ -17,7 +17,7 @@ from typing import Any, AsyncIterator, Callable
 
 from sqlalchemy.orm import Session
 
-from ..models import Book, BookAnalysis, Chapter, Generation
+from ..models import Book, BookAnalysis, Chapter, ChapterState, Generation
 from ..prompts import build_prompt
 from ..settings_store import get_settings
 from .indexing import index_chapters
@@ -26,12 +26,14 @@ from .rag import (
     PromptSlots,
     as_list,
     build_slots,
+    format_chapter_plan,
     format_foreshadows,
     format_outline,
     load_analysis,
     previous_chapters_text,
     resolve_target_number,
 )
+from .state import build_state_snapshot, extract_and_apply
 from .text_utils import count_words
 
 logger = logging.getLogger(__name__)
@@ -83,23 +85,41 @@ class Prepared:
     auto_planned: bool = False
 
 
-def _recent_summaries(analysis: BookAnalysis | None, target_number: int, limit: int = 6) -> str:
-    """取目标章节之前最近几章的摘要，供 AI 推演剧情。"""
-    if analysis is None:
-        return "（暂无章节摘要，建议先执行拆书）"
-    items = [
-        item
-        for item in as_list(analysis.chapter_summaries)
-        if isinstance(item, dict) and int(item.get("chapter_number") or 0) < target_number
+def _recent_summaries(
+    db: Session, book_id: int, analysis: BookAnalysis | None, target_number: int, limit: int = 8
+) -> str:
+    """取目标章节之前最近几章的摘要，供 AI 推演剧情。
+
+    关键点：AI 续写的章节原本**不会**进入 analysis.chapter_summaries，
+    于是连写时第 N 章的规划看不到第 N-1 章写的是什么。这里把
+    chapter_states（每章都会写）合并进来，彻底补上这个断层。
+    """
+    merged: dict[int, str] = {}
+    if analysis is not None:
+        for item in as_list(analysis.chapter_summaries):
+            if not isinstance(item, dict):
+                continue
+            number = int(item.get("chapter_number") or 0)
+            if number and number < target_number:
+                merged[number] = str(item.get("summary") or "")
+
+    # chapter_states 是更新的来源，覆盖摘书结果里可能过期的条目
+    states = (
+        db.query(ChapterState)
+        .filter(ChapterState.book_id == book_id, ChapterState.chapter_number < target_number)
+        .order_by(ChapterState.chapter_number)
+        .all()
+    )
+    for state in states:
+        if state.summary:
+            merged[state.chapter_number] = state.summary
+
+    if not merged:
+        return "（暂无章节摘要，建议先执行拆书或抽取剧情状态）"
+    lines = [
+        f"第{number}章：{merged[number][:200]}"
+        for number in sorted(merged)[-limit:]
     ]
-    if not items:
-        return "（暂无章节摘要）"
-    items.sort(key=lambda x: int(x.get("chapter_number") or 0))
-    lines = []
-    for item in items[-limit:]:
-        number = item.get("chapter_number")
-        summary = str(item.get("summary") or "")[:160]
-        lines.append(f"第{number}章：{summary}")
     return "\n".join(lines)
 
 
@@ -109,10 +129,22 @@ async def plan_next_chapter(
     target_number: int,
     analysis: BookAnalysis | None,
     model: str | None = None,
+    provider_id: int | None = None,
 ) -> dict[str, Any]:
-    """让 AI 自己决定下一章写什么（标题 + 目标 + 要推进的伏笔 + 结尾钩子）。"""
+    """让 AI 自己决定下一章写什么（标题 + 目标 + 要推进的伏笔 + 结尾钩子）。
+
+    与旧版的关键差异：规划阶段就能看到「当前剧情状态」和「原创模式的既定章节计划」，
+    所以推演出的剧情不会跟上一章的人物位置/持有物冲突，也不会跑偏主线。
+    """
     settings = get_settings(db, include_secrets=True)
-    prev_tail, _recent = previous_chapters_text(db, book.id, target_number, 1)
+    prev_tail, _recent = previous_chapters_text(
+        db,
+        book.id,
+        target_number,
+        1,
+        full_previous=bool(settings.get("previous_full_chapter", True)),
+        tail_chars=int(settings.get("previous_tail_chars") or 3000),
+    )
     foreshadows = (
         format_foreshadows(as_list(analysis.foreshadows)) if analysis else ""
     )
@@ -121,9 +153,17 @@ async def plan_next_chapter(
         "plan_next_chapter",
         settings.get("prompt_overrides"),
         outline=format_outline(analysis, target_number),
+        story_state=build_state_snapshot(
+            db,
+            book.id,
+            target_number=target_number,
+            budget=int(settings.get("state_snapshot_budget") or 6000),
+            analysis=analysis,
+        ),
         foreshadows=foreshadows or "（暂无未回收伏笔记录）",
-        recent_summaries=_recent_summaries(analysis, target_number),
+        recent_summaries=_recent_summaries(db, book.id, analysis, target_number),
         previous_tail=prev_tail or "（这是本书的开头，没有上一章）",
+        chapter_plan=format_chapter_plan(analysis, target_number),
         chapter_number=target_number,
     )
     data, result = await chat_json(
@@ -135,6 +175,7 @@ async def plan_next_chapter(
         task="outline",  # 走复杂任务模型（推理能力更强）
         model=model,
         book_id=book.id,
+        provider_id=provider_id,
     )
     if not isinstance(data, dict):
         raise ValueError("自动推演剧情失败：模型没有返回 JSON 计划")
@@ -145,6 +186,26 @@ async def plan_next_chapter(
         result.output_tokens,
     )
     return data
+
+
+def _planned_chapter(analysis: BookAnalysis | None, target_number: int) -> dict[str, Any] | None:
+    """原创模式：从章节计划里取出本章的既定目标。"""
+    if analysis is None:
+        return None
+    for item in as_list(analysis.chapter_plan):
+        if isinstance(item, dict) and int(item.get("number") or 0) == target_number:
+            return item
+    return None
+
+
+async def extract_state_after_save(
+    db: Session, book_id: int, chapter_number: int, *, provider_id: int | None = None
+) -> None:
+    """保存章节后自动抽取剧情状态；受设置开关控制，失败不影响主流程。"""
+    settings = get_settings(db, include_secrets=True)
+    if not settings.get("auto_extract_state", True):
+        return
+    await extract_and_apply(db, book_id, chapter_number, provider_id=provider_id)
 
 
 async def build(db: Session, req: Any) -> Prepared:
@@ -163,9 +224,19 @@ async def build(db: Session, req: Any) -> Prepared:
     auto_planned = False
     title = (getattr(req, "chapter_title", "") or "").strip()
 
+    provider_id = getattr(req, "provider_id", None)
+
+    # 原创模式：本章在既定章节计划里已经有目标，直接采用，不必再让 AI 推演
+    planned = _planned_chapter(analysis, target)
+    if planned and not goal:
+        goal = str(planned.get("goal") or "").strip()
+        title = title or str(planned.get("title") or "").strip()
+
     writable = req.mode in {"continue", "outline"}
     if writable and (not goal or getattr(req, "auto_goal", False)):
-        plan = await plan_next_chapter(db, book, target, analysis, req.model)
+        plan = await plan_next_chapter(
+            db, book, target, analysis, req.model, provider_id=provider_id
+        )
         goal = str(plan.get("goal") or "").strip() or goal
         title = title or str(plan.get("title") or "").strip()
         auto_planned = True
@@ -192,6 +263,7 @@ async def build(db: Session, req: Any) -> Prepared:
             "goal": goal,
             "target_words": req.target_words,
             "source_text": getattr(req, "source_text", "") or "",
+            "chapter_plan": format_chapter_plan(analysis, target),
         }
     )
     prompt = build_prompt(
@@ -199,7 +271,7 @@ async def build(db: Session, req: Any) -> Prepared:
         settings.get("prompt_overrides"),
         **mapping,
     )
-    model = resolve_model(db, TASK_BY_MODE[req.mode], req.model)
+    model = resolve_model(db, TASK_BY_MODE[req.mode], req.model, provider_id=provider_id)
     return Prepared(
         book=book,
         slots=slots,
@@ -240,6 +312,7 @@ def _new_generation(db: Session, req: Any, prepared: Prepared) -> Generation:
 async def generate(db: Session, req: Any, report: ReportFn | None = None) -> Generation:
     """一次性生成（非流式）。"""
     report = report or _noop
+    provider_id = getattr(req, "provider_id", None)
     prepared = await build(db, req)
     target = prepared.slots.chapter_number
     report(0.05, "上下文拼装完成，正在调用模型 ...", 0, 1)
@@ -254,6 +327,7 @@ async def generate(db: Session, req: Any, report: ReportFn | None = None) -> Gen
             model=req.model,
             book_id=prepared.book.id,
             temperature=req.temperature,
+            provider_id=provider_id,
         )
     except Exception as exc:  # noqa: BLE001
         row.status = "error"
@@ -294,6 +368,10 @@ async def generate(db: Session, req: Any, report: ReportFn | None = None) -> Gen
             )
             if chapter is not None:
                 row.saved_chapter_id = chapter.id
+                report(0.9, "正在抽取本章剧情状态 ...", 1, 1)
+                await extract_state_after_save(
+                    db, prepared.book.id, chapter.number, provider_id=provider_id
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("自动保存章节失败（不影响生成结果）: %s", exc)
             row.error = f"自动保存失败：{exc}"
@@ -306,6 +384,7 @@ async def generate(db: Session, req: Any, report: ReportFn | None = None) -> Gen
 
 async def generate_stream(db: Session, req: Any) -> AsyncIterator[dict[str, Any]]:
     """流式生成，逐段返回给前端（SSE）。"""
+    provider_id = getattr(req, "provider_id", None)
     prepared = await build(db, req)
     target = prepared.slots.chapter_number
     row = _new_generation(db, req, prepared)
@@ -320,12 +399,14 @@ async def generate_stream(db: Session, req: Any) -> AsyncIterator[dict[str, Any]
         "title": prepared.title,
         "auto_planned": prepared.auto_planned,
         "plan": prepared.plan,
+        "story_state": prepared.slots.story_state,
         "retrieved": [
             {
                 "chapter_number": item["chapter_number"],
                 "chapter_title": item.get("chapter_title", ""),
                 "score": item["score"],
                 "text": item["text"],
+                "recall": item.get("recall", "semantic"),
             }
             for item in prepared.slots.retrieved
         ],
@@ -340,6 +421,7 @@ async def generate_stream(db: Session, req: Any) -> AsyncIterator[dict[str, Any]
             model=req.model,
             book_id=prepared.book.id,
             temperature=req.temperature,
+            provider_id=provider_id,
         ):
             if event["type"] == "delta":
                 yield {"type": "delta", "text": event["text"]}
@@ -383,6 +465,13 @@ async def generate_stream(db: Session, req: Any) -> AsyncIterator[dict[str, Any]
                     )
                     if chapter is not None:
                         row.saved_chapter_id = chapter.id
+                        yield {
+                            "type": "status",
+                            "message": "正在抽取本章剧情状态 ...",
+                        }
+                        await extract_state_after_save(
+                            db, prepared.book.id, chapter.number, provider_id=provider_id
+                        )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("自动保存章节失败（不影响生成结果）: %s", exc)
                     row.error = f"自动保存失败：{exc}"
@@ -433,6 +522,7 @@ async def generate_batch(
 
     count = max(1, min(int(getattr(req, "count", 5) or 5), 20))
     chapter_number = getattr(req, "start_chapter", None) or None
+    provider_id = getattr(req, "provider_id", None)
     completed: list[dict[str, Any]] = []
 
     for index in range(count):
@@ -450,6 +540,7 @@ async def generate_batch(
             goal="",                     # 留空 = 让 AI 自己决定
             target_words=int(getattr(req, "target_words", 3000) or 3000),
             model=req.model,
+            provider_id=provider_id,
             mode="continue",
             previous_chapters=int(getattr(req, "previous_chapters", 2) or 2),
             auto_save=False,             # 由本函数统一负责入库，带上 AI 拟定的标题
@@ -471,6 +562,16 @@ async def generate_batch(
         if chapter is not None:
             generation.saved_chapter_id = chapter.id
             db.commit()
+            report(
+                0.02 + 0.95 * ((index + 0.5) / count),
+                f"正在抽取第 {chapter.number} 章剧情状态…",
+                index,
+                count,
+            )
+            # 关键：先把本章状态落库，下一章的推演才能对齐人物位置与持有物
+            await extract_state_after_save(
+                db, book.id, chapter.number, provider_id=provider_id
+            )
 
         completed.append(
             {
@@ -577,7 +678,11 @@ def _next_number(db: Session, book_id: int) -> int:
 
 
 async def check_consistency(
-    db: Session, book_id: int, source_text: str, model: str | None = None
+    db: Session,
+    book_id: int,
+    source_text: str,
+    model: str | None = None,
+    provider_id: int | None = None,
 ) -> dict[str, Any]:
     """伏笔检查 / 逻辑矛盾检查（走 Pro 模型）。"""
     book = db.get(Book, book_id)
@@ -592,10 +697,12 @@ async def check_consistency(
         top_k=int(settings.get("retrieval_top_k") or 8),
         previous_count=1,
     )
+    # 把「当前剧情状态」一并交给校对，它才有依据判断「人物是不是不该出现在这里」
+    core_settings = slots.story_state + "\n\n" + slots.core_settings
     prompt = build_prompt(
         "consistency_check",
         settings.get("prompt_overrides"),
-        core_settings=slots.core_settings,
+        core_settings=core_settings,
         foreshadows=slots.foreshadows,
         source_text=source_text,
     )
@@ -608,6 +715,7 @@ async def check_consistency(
         task="consistency",
         model=model,
         book_id=book_id,
+        provider_id=provider_id,
     )
     try:
         data = parse_json(result.text)

@@ -9,13 +9,37 @@ interface Props {
   onSettled?: (job: Job) => void
 }
 
+/** 把秒数写成「3 分 12 秒」。 */
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds} 秒`
+  const m = Math.floor(seconds / 60)
+  const s = seconds % 60
+  return s ? `${m} 分 ${s} 秒` : `${m} 分`
+}
+
 export default function JobProgress({ jobId, onDone, onSettled }: Props) {
   const [job, setJob] = useState<Job | null>(null)
+  const [elapsed, setElapsed] = useState(0)
   const settledRef = useRef<string | null>(null)
   const doneRef = useRef(onDone)
   const settledCbRef = useRef(onSettled)
   doneRef.current = onDone
   settledCbRef.current = onSettled
+
+  const running = job?.status === 'running' || job?.status === 'pending'
+
+  // 记时器：后端在一次模型调用期间不会有新的进度上报，
+  // 没有这个"已运行 N 秒"用户会以为任务死了。
+  useEffect(() => {
+    if (!running) return
+    const startedAt = Date.now()
+    setElapsed(0)
+    const timer = window.setInterval(
+      () => setElapsed(Math.floor((Date.now() - startedAt) / 1000)),
+      1000,
+    )
+    return () => window.clearInterval(timer)
+  }, [running, jobId])
 
   useEffect(() => {
     if (!jobId) {
@@ -92,6 +116,7 @@ export default function JobProgress({ jobId, onDone, onSettled }: Props) {
         <span>
           {job.total > 0 ? `${job.done}/${job.total} · ` : ''}
           {percent}%
+          {running ? ` · 已运行 ${formatDuration(elapsed)}` : ''}
         </span>
       </div>
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
@@ -100,6 +125,12 @@ export default function JobProgress({ jobId, onDone, onSettled }: Props) {
       <p className="mt-2 whitespace-pre-wrap text-xs text-slate-400">
         {job.error || job.message || '处理中…'}
       </p>
+      {running && elapsed >= 15 ? (
+        <p className="mt-1 text-[11px] text-slate-500">
+          正在等待模型返回。推理模型一次生成较多内容时需要 1~3 分钟，等待期间进度不动是正常的 ——
+          超过设置里的 llm_timeout 会被主动中断并给出提示，不会一直挂着。
+        </p>
+      ) : null}
       {job.status === 'running' ? (
         <button
           className="btn-ghost mt-2 !px-2 !py-1 text-xs"

@@ -56,9 +56,12 @@ def index_chapters(
     chapter_list = list(chapters)
     embedder, store = get_store(db)
 
+    # 只有「向量模型变化导致旧索引被清空」时才为 True。
+    # 索引为空但章节标记已向量化的情况（例如手动删了向量文件）由下面的
+    # `chapter.number not in indexed` 兜住，同样会触发重跑。
     created = store.ensure_book(book_id)
     if created:
-        logger.info("书籍 %s 的向量集合已新建/重建，将全量向量化", book_id)
+        logger.info("书籍 %s 的向量索引因向量模型变化已重建，将全量向量化", book_id)
 
     indexed = store.indexed_chapters(book_id)
     total = len(chapter_list)

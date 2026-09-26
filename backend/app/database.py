@@ -52,7 +52,10 @@ def init_db() -> None:
 
 
 def _ensure_columns() -> None:
-    """SQLite 轻量迁移：给已存在的表补上后来新增的列（不引入 Alembic）。"""
+    """SQLite 轻量迁移：给已存在的表补上后来新增的列（不引入 Alembic）。
+
+    新增的**表**由 create_all 自动创建；只有「给老表加列」需要在这里登记。
+    """
     from sqlalchemy import inspect, text
 
     try:
@@ -60,6 +63,12 @@ def _ensure_columns() -> None:
         tables = set(inspector.get_table_names())
         wanted: dict[str, dict[str, str]] = {
             "generations": {"title": "VARCHAR(500) DEFAULT ''"},
+            # 原创模式：区分「导入别人的书续写」与「从零原创」
+            "books": {"kind": "VARCHAR(20) DEFAULT 'imported'"},
+            # 原创模式的章节计划
+            "book_analyses": {"chapter_plan": "JSON DEFAULT '[]'"},
+            # 故事状态相关开关（旧库补默认值）
+            "chapters": {"state_extracted": "BOOLEAN DEFAULT 0"},
         }
         with engine.begin() as conn:
             for table, columns in wanted.items():

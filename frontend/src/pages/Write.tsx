@@ -17,11 +17,13 @@ import type {
   GenerateRequest,
   Generation,
   RetrievedChunk,
+  StoryState,
 } from '../types'
 
 const FALLBACK_SETTINGS: Pick<AppSettings, 'text_model' | 'reasoning_model'> = {
-  text_model: 'deepseek-v4.1-flash',
-  reasoning_model: 'deepseek-v4.1-pro',
+  // 故意留空：模型名必须以你的网关为准，这里不预设假名字，免得误导
+  text_model: '',
+  reasoning_model: '',
 }
 
 export default function Write() {
@@ -51,7 +53,13 @@ export default function Write() {
   // 生成状态
   const [output, setOutput] = useState('')
   const [streaming, setStreaming] = useState(false)
-  const [meta, setMeta] = useState<{ model: string; prompt: string; retrieved: RetrievedChunk[] } | null>(null)
+  const [status, setStatus] = useState('')
+  const [meta, setMeta] = useState<{
+    model: string
+    prompt: string
+    retrieved: RetrievedChunk[]
+    storyState?: string
+  } | null>(null)
   const [done, setDone] = useState<{ id: number; input: number; output: number; usd: number; cny: number; words: number } | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
@@ -67,6 +75,20 @@ export default function Write() {
 
   // 检查结果
   const [consistency, setConsistency] = useState<ConsistencyResult | null>(null)
+
+  // 剧情状态层（续写一致性的依据）
+  const [story, setStory] = useState<StoryState | null>(null)
+  const [storyBusy, setStoryBusy] = useState(false)
+  const [storyJobId, setStoryJobId] = useState<string | null>(null)
+
+  const refreshStory = useCallback(async () => {
+    if (!id) return
+    try {
+      setStory(await api.getStoryState(id, targetChapter))
+    } catch {
+      setStory(null)
+    }
+  }, [id, targetChapter])
 
   const load = useCallback(async () => {
     if (!id) return
@@ -99,6 +121,10 @@ export default function Write() {
   useEffect(() => {
     load()
   }, [load])
+
+  useEffect(() => {
+    refreshStory()
+  }, [refreshStory])
 
   const resolvedModel = useMemo(() => {
     if (modelChoice === 'auto') return null
@@ -179,7 +205,12 @@ export default function Write() {
     try {
       for await (const event of streamGenerate(buildRequest(overrideMode), controller.signal)) {
         if (event.type === 'meta') {
-          setMeta({ model: event.model, prompt: event.prompt, retrieved: event.retrieved })
+          setMeta({
+            model: event.model,
+            prompt: event.prompt,
+            retrieved: event.retrieved,
+            storyState: event.story_state,
+          })
           if (event.auto_planned) {
             setPlanned({
               title: event.title ?? '',
@@ -187,6 +218,9 @@ export default function Write() {
               plan: event.plan ?? null,
             })
           }
+        } else if (event.type === 'status') {
+          setStatus(event.message)
+          toast.info(event.message)
         } else if (event.type === 'delta') {
           setOutput((prev) => prev + event.text)
         } else if (event.type === 'done') {
@@ -206,6 +240,7 @@ export default function Write() {
             toast.info(event.warning)
           }
           api.listGenerations(id, 20).then(setHistory).catch(() => undefined)
+          if (event.saved_chapter_id) refreshStory()
         } else if (event.type === 'error') {
           toast.error(event.message)
         }
@@ -216,7 +251,25 @@ export default function Write() {
       }
     } finally {
       setStreaming(false)
+      setStatus('')
       abortRef.current = null
+    }
+  }
+
+  /** 给已有书稿批量补建剧情状态层（走廉价模型）。 */
+  const startExtractStates = async () => {
+    setStoryBusy(true)
+    try {
+      const res = await api.extractStates(id, {
+        upto: targetChapter,
+        batch_size: 4,
+      })
+      setStoryJobId(res.job_id)
+      toast.success(res.message)
+    } catch (error) {
+      toast.error((error as Error).message)
+    } finally {
+      setStoryBusy(false)
     }
   }
 
@@ -642,6 +695,81 @@ export default function Write() {
 
         {/* -------- 右：历史 + 检索 -------- */}
         <aside className="space-y-4">
+          {/* -------- 剧情状态：续写一致性的依据 -------- */}
+          <div className="card space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-slate-300">剧情状态</h3>
+              <button
+                className="btn-ghost !px-2 !py-1 text-xs"
+                onClick={startExtractStates}
+                disabled={storyBusy}
+              >
+                {storyBusy ? '启动中…' : '补建状态'}
+              </button>
+            </div>
+
+            {story ? (
+              <>
+                <p className="text-[11px] text-slate-500">
+                  已建状态 {story.chapters.length} 章
+                  {story.missing_chapters.length > 0
+                    ? ` ｜ 待补建 ${story.missing_chapters.length} 章`
+                    : ' ｜ 全部已覆盖'}
+                  {story.state_model ? ` ｜ 抽取模型 ${story.state_model}` : ''}
+                  {story.auto_extract ? ' ｜ 写完后自动抽取' : ' ｜ 自动抽取已关闭'}
+                </p>
+
+                {story.missing_chapters.length > 0 ? (
+                  <p className="rounded border border-amber-900 bg-amber-950/30 p-2 text-[11px] text-amber-300">
+                    第 {story.missing_chapters.slice(0, 12).join('、')}
+                    {story.missing_chapters.length > 12 ? ' …' : ''} 章还没有状态，
+                    续写时这些章节的信息只能靠原文片段检索，建议点「补建状态」。
+                  </p>
+                ) : null}
+
+                {story.characters.length > 0 ? (
+                  <div className="max-h-56 space-y-1 overflow-y-auto">
+                    {story.characters.slice(0, 12).map((c) => (
+                      <div
+                        key={c.id}
+                        className="rounded border border-slate-800 bg-slate-950/40 p-2 text-[11px]"
+                      >
+                        <div className="flex items-center justify-between text-slate-400">
+                          <span className="font-medium text-slate-300">{c.name}</span>
+                          <span>{c.last_seen_chapter ? `第${c.last_seen_chapter}章` : '未出场'}</span>
+                        </div>
+                        <p className="text-slate-500">
+                          {[c.location && `位置：${c.location}`, c.doing && `在做：${c.doing}`]
+                            .filter(Boolean)
+                            .join(' ｜ ') || '（暂无状态）'}
+                        </p>
+                        {c.items && c.items.length > 0 ? (
+                          <p className="text-slate-500">持有：{c.items.join('、')}</p>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                {story.snapshot ? (
+                  <PreviewBlock title="实际注入模型的状态快照" text={story.snapshot} />
+                ) : null}
+              </>
+            ) : (
+              <p className="text-xs text-slate-500">暂时读不到状态层，请确认后端已启动。</p>
+            )}
+
+            {storyJobId ? (
+              <JobProgress
+                jobId={storyJobId}
+                onDone={() => {
+                  setStoryJobId(null)
+                  refreshStory()
+                }}
+              />
+            ) : null}
+          </div>
+
           <div className="card space-y-2">
             <h3 className="text-sm font-semibold text-slate-300">本次检索到的片段</h3>
             {meta?.retrieved && meta.retrieved.length > 0 ? (
@@ -650,6 +778,11 @@ export default function Write() {
                   <div className="mb-1 flex justify-between text-slate-500">
                     <span>
                       第{item.chapter_number}章 {item.chapter_title}
+                      {item.recall === 'keyword' ? (
+                        <span className="ml-1 text-amber-300" title="关键词必召回（与人物/物品直接相关）">
+                          ★关键锚点
+                        </span>
+                      ) : null}
                     </span>
                     <span>相似度 {item.score.toFixed(3)}</span>
                   </div>
@@ -721,14 +854,18 @@ export default function Write() {
           <div className="space-y-4 text-xs">
             <div className="grid gap-2 text-slate-400 md:grid-cols-3">
               <div>目标章节：第 {preview.chapter_number} 章</div>
-              <div>使用模型：{preview.model}</div>
+              <div>使用模型：{preview.model || '（未配置，请到设置页拉取可用模型）'}</div>
               <div>检索片段：{preview.retrieved.length} 条</div>
             </div>
             <PreviewBlock title="最终提示词（prompt）" text={preview.prompt} mono />
+            <PreviewBlock
+              title="★ 当前剧情状态（人物位置 / 在做什么 / 持有物 / 谁不在场）"
+              text={preview.story_state}
+            />
             <PreviewBlock title="大纲" text={preview.outline_text} />
             <PreviewBlock title="核心设定（人物卡 / 世界观 / 文风 / 原文片段）" text={preview.core_settings_text} />
             <PreviewBlock title="未回收伏笔" text={preview.foreshadow_text} />
-            <PreviewBlock title="上一章结尾" text={preview.previous_tail} />
+            <PreviewBlock title="上一章内容" text={preview.previous_tail} />
           </div>
         ) : null}
       </Modal>
@@ -737,7 +874,7 @@ export default function Write() {
 }
 
 function PreviewBlock({ title, text, mono }: { title: string; text: string; mono?: boolean }) {
-  const [open, setOpen] = useState(title.includes('提示词'))
+  const [open, setOpen] = useState(title.includes('提示词') || title.includes('剧情状态'))
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-950/50">
       <button

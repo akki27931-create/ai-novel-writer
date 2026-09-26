@@ -57,7 +57,12 @@ class VectorStore:
 
     # ------------------------------------------------------------------
     def ensure_book(self, book_id: int) -> bool:
-        """确保本书的向量集合存在。返回 True 表示集合是新建/重建的（需要重新向量化）。"""
+        """确保本书的向量集合存在。
+
+        返回 True **仅当**检测到向量模型已变化、旧索引被清空（此时必须重新向量化）。
+        全新书籍只登记签名、建空集合，返回 False —— 调用方会把 True 当成
+        「索引与向量模型不匹配」来报警，新建的书不该触发这个警告。
+        """
         with self._lock:
             return self._backend.ensure_book(book_id)
 
@@ -97,6 +102,30 @@ class VectorStore:
         with self._lock:
             return self._backend.query(
                 book_id, embedding, top_k=top_k, max_chapter_number=max_chapter_number
+            )
+
+    def keyword_search(
+        self,
+        book_id: int,
+        keywords: list[str],
+        *,
+        limit: int = 4,
+        max_chapter_number: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """关键词**必召回**：不依赖语义相似度，字面命中就返回。
+
+        用于兜住「主角身上那把钥匙是谁给的」这类关键锚点 —— 换个措辞
+        语义检索就召不回来了，但人名/物品名一定是字面出现的。
+        """
+        cleaned = [k.strip() for k in keywords if k and k.strip()]
+        if not cleaned:
+            return []
+        with self._lock:
+            return self._backend.keyword_search(
+                book_id,
+                cleaned,
+                limit=max(1, limit),
+                max_chapter_number=max_chapter_number,
             )
 
     def indexed_chapters(self, book_id: int) -> set[int]:
@@ -159,10 +188,12 @@ class _ChromaBackend:
             self._collection(book_id)
             return True
         if key not in self._meta:
+            # 全新书籍：只是登记签名 + 建空集合，没有清空任何东西，
+            # 所以返回 False —— 否则调用方会误报「索引与向量模型不匹配，已清空」。
             self._meta[key] = self._signature
             self._save_meta()
             self._collection(book_id)
-            return True
+            return False
         return False
 
     def _save_meta(self) -> None:
@@ -246,6 +277,57 @@ class _ChromaBackend:
             )
         return items
 
+    def keyword_search(
+        self,
+        book_id: int,
+        keywords: list[str],
+        *,
+        limit: int,
+        max_chapter_number: int | None,
+    ) -> list[dict[str, Any]]:
+        collection = self._collection(book_id, create=False)
+        if collection is None or collection.count() == 0:
+            return []
+        where = None
+        if max_chapter_number is not None:
+            where = {"chapter_number": {"$lt": int(max_chapter_number)}}
+        try:
+            data = collection.get(where=where, include=["documents", "metadatas"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("关键词召回失败: %s", exc)
+            return []
+
+        documents = data.get("documents") or []
+        metadatas = data.get("metadatas") or []
+        scored: list[tuple[float, int, str, str]] = []
+        for text, meta in zip(documents, metadatas):
+            body = text or ""
+            hits = sum(1 for kw in keywords if kw in body)
+            if not hits:
+                continue
+            meta = meta or {}
+            number = int(meta.get("chapter_number", 0))
+            scored.append(
+                (
+                    round(hits / len(keywords), 4),
+                    number,
+                    body,
+                    meta.get("chapter_title", "") or "",
+                )
+            )
+        scored.sort(key=lambda item: (-item[0], -item[1]))
+        return [
+            {
+                "text": body,
+                "chapter_number": number,
+                "chapter_title": title,
+                # 关键词命中给一个高于语义召回的分，确保不会被 top_k 截掉
+                "score": min(0.99, 0.6 + ratio * 0.39),
+                "recall": "keyword",
+            }
+            for ratio, number, body, title in scored[:limit]
+        ]
+
     def indexed_chapters(self, book_id: int) -> set[int]:
         collection = self._collection(book_id, create=False)
         if collection is None or collection.count() == 0:
@@ -297,10 +379,11 @@ class _JsonBackend:
             self._save_meta()
             return True
         if key not in self._meta:
+            # 全新书籍：仅登记签名，没有清空任何东西（见 Chroma 后端的同名注释）
             self._meta[key] = self._signature
             self._save_meta()
             self._load(book_id)
-            return True
+            return False
         return False
 
     def add(
@@ -369,6 +452,42 @@ class _JsonBackend:
                 "score": round(float(scores[i]), 4),
             }
             for i in order
+        ]
+
+    def keyword_search(
+        self,
+        book_id: int,
+        keywords: list[str],
+        *,
+        limit: int,
+        max_chapter_number: int | None,
+    ) -> list[dict[str, Any]]:
+        scored: list[tuple[float, int, str, str]] = []
+        for record in self._load(book_id):
+            if max_chapter_number is not None and record["chapter_number"] >= max_chapter_number:
+                continue
+            body = record.get("text") or ""
+            hits = sum(1 for kw in keywords if kw in body)
+            if not hits:
+                continue
+            scored.append(
+                (
+                    round(hits / len(keywords), 4),
+                    int(record["chapter_number"]),
+                    body,
+                    record.get("chapter_title", "") or "",
+                )
+            )
+        scored.sort(key=lambda item: (-item[0], -item[1]))
+        return [
+            {
+                "text": body,
+                "chapter_number": number,
+                "chapter_title": title,
+                "score": min(0.99, 0.6 + ratio * 0.39),
+                "recall": "keyword",
+            }
+            for ratio, number, body, title in scored[:limit]
         ]
 
     def indexed_chapters(self, book_id: int) -> set[int]:

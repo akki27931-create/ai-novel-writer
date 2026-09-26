@@ -1,4 +1,4 @@
-/** 首页：导入小说（番茄 MCP / 上传 TXT-EPUB / 手动粘贴）+ 书架列表。 */
+/** 首页：导入小说（番茄 MCP / 上传 TXT-EPUB / 手动粘贴 / 从零原创）+ 书架列表。 */
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../api'
@@ -8,7 +8,7 @@ import { toast } from '../components/Toast'
 import { formatNumber, formatDate, sourceLabel } from '../lib/format'
 import type { Book, FanqieStatus } from '../types'
 
-type Tab = 'fanqie' | 'upload' | 'paste'
+type Tab = 'fanqie' | 'upload' | 'paste' | 'original'
 
 /** 从番茄返回的任意结构里猜书籍 ID */
 function pickBookId(item: any): string {
@@ -74,6 +74,7 @@ export default function Home() {
           [
             ['upload', '上传 TXT / EPUB'],
             ['paste', '手动粘贴'],
+            ['original', '从零原创'],
             ['fanqie', '番茄小说'],
           ] as [Tab, string][]
         ).map(([key, label]) => (
@@ -91,6 +92,7 @@ export default function Home() {
 
       {tab === 'upload' ? <UploadPanel onDone={loadBooks} navigate={navigate} /> : null}
       {tab === 'paste' ? <PastePanel onDone={loadBooks} navigate={navigate} /> : null}
+      {tab === 'original' ? <OriginalPanel onJob={setJobId} onDone={loadBooks} navigate={navigate} /> : null}
       {tab === 'fanqie' ? <FanqiePanel onJob={setJobId} onDone={loadBooks} navigate={navigate} /> : null}
 
       {jobId ? <JobProgress jobId={jobId} onDone={loadBooks} onSettled={() => loadBooks()} /> : null}
@@ -130,13 +132,21 @@ export default function Home() {
                   {formatDate(book.updated_at)}
                 </p>
                 <div className="flex flex-wrap gap-1">
-                  <span className="tag bg-slate-800 text-slate-400">{sourceLabel(book.source)}</span>
+                  <span className="tag bg-slate-800 text-slate-400">
+                    {book.kind === 'original' ? '原创' : sourceLabel(book.source)}
+                  </span>
                   <span
                     className={`tag ${
                       book.analyzed ? 'bg-emerald-950 text-emerald-300' : 'bg-amber-950 text-amber-300'
                     }`}
                   >
-                    {book.analyzed ? '已拆书' : '未拆书'}
+                    {book.kind === 'original'
+                      ? book.analyzed
+                        ? '已立设定'
+                        : '未立设定'
+                      : book.analyzed
+                        ? '已拆书'
+                        : '未拆书'}
                   </span>
                 </div>
                 {book.intro ? (
@@ -280,6 +290,177 @@ function PastePanel({ onDone, navigate }: { onDone: () => void; navigate: (p: st
       <button className="btn-primary" onClick={submit} disabled={busy}>
         {busy ? '导入中…' : '导入并创建书籍'}
       </button>
+    </div>
+  )
+}
+
+// ======================================================================
+/** 从零原创：给一句话设定，AI 生成故事圣经 + 章节计划，然后逐章写下去。 */
+function OriginalPanel({
+  onJob,
+  onDone,
+  navigate,
+}: {
+  onJob: (id: string) => void
+  onDone: () => void
+  navigate: (p: string) => void
+}) {
+  const [title, setTitle] = useState('')
+  const [genre, setGenre] = useState('东方玄幻')
+  const [protagonist, setProtagonist] = useState('')
+  const [hook, setHook] = useState('')
+  const [styleHint, setStyleHint] = useState('节奏快、冲突直接、爽点密集')
+  const [extra, setExtra] = useState('')
+  const [totalChapters, setTotalChapters] = useState(120)
+  const [targetWords, setTargetWords] = useState(3000)
+  const [planChapters, setPlanChapters] = useState(20)
+  const [planBatch, setPlanBatch] = useState(5)
+  const [busy, setBusy] = useState(false)
+
+  const submit = async () => {
+    if (!title.trim()) {
+      toast.error('请先填写书名')
+      return
+    }
+    setBusy(true)
+    try {
+      const res = await api.createOriginalBook({
+        title: title.trim(),
+        genre: genre.trim(),
+        protagonist: protagonist.trim(),
+        hook: hook.trim(),
+        style_hint: styleHint.trim(),
+        extra: extra.trim(),
+        total_chapters: totalChapters,
+        target_words: targetWords,
+        plan_chapters: planChapters,
+        plan_batch_size: planBatch,
+      })
+      toast.success(res.message)
+      onJob(res.job_id)
+      onDone()
+    } catch (error) {
+      toast.error((error as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="card space-y-3">
+      <p className="rounded-lg border border-slate-800 bg-slate-950/50 p-3 text-xs text-slate-400">
+        不想受别人原文约束？直接从零开一本。AI 会先产出<b>故事圣经</b>（总纲 / 人物 / 世界观 / 伏笔）
+        与<b>逐章计划</b>，之后每章按计划写、并按剧情状态层自动维护人物位置与持有物。
+        <br />
+        好处很直接：设定从一开始就在模型手里，人物、物品、时间线天然不容易前后矛盾 ——
+        这比「续写别人的书、只给前面几章」稳定得多。
+      </p>
+
+      <div className="grid gap-3 md:grid-cols-3">
+        <div>
+          <label className="label">书名</label>
+          <input
+            className="input"
+            placeholder="例如：星陨荒原"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+          />
+        </div>
+        <div>
+          <label className="label">题材 / 类型</label>
+          <input className="input" value={genre} onChange={(e) => setGenre(e.target.value)} />
+        </div>
+        <div>
+          <label className="label">总章数（规划用）</label>
+          <input
+            type="number"
+            min={10}
+            className="input"
+            value={totalChapters}
+            onChange={(e) => setTotalChapters(Number(e.target.value) || 120)}
+          />
+        </div>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        <div>
+          <label className="label">主角设定（留空由 AI 设计）</label>
+          <input
+            className="input"
+            placeholder="例如：荒原少年秦风，倔强、护短"
+            value={protagonist}
+            onChange={(e) => setProtagonist(e.target.value)}
+          />
+        </div>
+        <div>
+          <label className="label">核心金手指 / 卖点（留空由 AI 设计）</label>
+          <input
+            className="input"
+            placeholder="例如：捡到一枚会吸收星辰之力的青铜残片"
+            value={hook}
+            onChange={(e) => setHook(e.target.value)}
+          />
+        </div>
+        <div>
+          <label className="label">风格要求</label>
+          <input className="input" value={styleHint} onChange={(e) => setStyleHint(e.target.value)} />
+        </div>
+        <div>
+          <label className="label">单章字数</label>
+          <input
+            type="number"
+            min={500}
+            className="input"
+            value={targetWords}
+            onChange={(e) => setTargetWords(Number(e.target.value) || 3000)}
+          />
+        </div>
+        <div>
+          <label className="label">建书时先排多少章计划</label>
+          <input
+            type="number"
+            min={0}
+            max={200}
+            className="input"
+            value={planChapters}
+            onChange={(e) => setPlanChapters(Number(e.target.value) || 0)}
+          />
+        </div>
+        <div>
+          <label className="label">每批排几章（推荐 3~5）</label>
+          <input
+            type="number"
+            min={1}
+            max={20}
+            className="input"
+            value={planBatch}
+            onChange={(e) => setPlanBatch(Number(e.target.value) || 5)}
+          />
+          <p className="mt-1 text-[11px] text-slate-500">
+            计划是分批让模型写的。一批越多单次等待越久（推理模型可能要几分钟），
+            也越容易被 max_tokens 截断，所以别调太大。
+          </p>
+        </div>
+        <div>
+          <label className="label">补充要求（可选）</label>
+          <input
+            className="input"
+            placeholder="例如：不要系统流，感情线淡一些"
+            value={extra}
+            onChange={(e) => setExtra(e.target.value)}
+          />
+        </div>
+      </div>
+
+      <button className="btn-primary" onClick={submit} disabled={busy}>
+        {busy ? '正在构思…' : '生成故事圣经并建书'}
+      </button>
+      <p className="text-[11px] text-slate-500">
+        建好后到「书架 → 打开」，可以继续排后续章节计划，也可以直接点「续写」开始逐章写。
+        <button className="ml-1 text-indigo-400 hover:text-indigo-300" onClick={() => navigate('/settings')}>
+          先去设置网关
+        </button>
+      </p>
     </div>
   )
 }

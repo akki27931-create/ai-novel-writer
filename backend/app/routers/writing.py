@@ -28,6 +28,7 @@ from ..services.writer import (
     PROMPT_BY_MODE,
     build,
     check_consistency,
+    extract_state_after_save,
     generate,
     generate_batch,
     generate_stream,
@@ -68,6 +69,7 @@ async def preview(payload: GenerateRequest, db: Session = Depends(get_db)) -> Ge
         outline_text=slots.outline,
         core_settings_text=slots.core_settings,
         foreshadow_text=slots.foreshadows,
+        story_state=slots.story_state,
         previous_tail=slots.previous_tail,
         goal=prepared.goal,
         title=prepared.title,
@@ -79,6 +81,7 @@ async def preview(payload: GenerateRequest, db: Session = Depends(get_db)) -> Ge
                 chapter_title=item.get("chapter_title", ""),
                 score=item["score"],
                 text=item["text"],
+                recall=item.get("recall", "semantic"),
             )
             for item in slots.retrieved
         ],
@@ -193,10 +196,10 @@ def delete_generation(generation_id: int, db: Session = Depends(get_db)) -> None
 
 
 @router.post("/generations/{generation_id}/save", response_model=ChapterOut)
-def save_generation(
+async def save_generation(
     generation_id: int, payload: SaveGenerationRequest, db: Session = Depends(get_db)
 ) -> Chapter:
-    """把生成结果保存（或覆盖）为书籍章节。"""
+    """把生成结果保存（或覆盖）为书籍章节，并顺手抽取本章剧情状态。"""
     row = db.get(Generation, generation_id)
     if row is None:
         raise HTTPException(status_code=404, detail="生成记录不存在")
@@ -221,6 +224,13 @@ def save_generation(
         raise HTTPException(status_code=400, detail="保存失败：内容为空")
     row.saved_chapter_id = chapter.id
     db.commit()
+
+    # 手动保存也要建状态，否则下一章的上下文里缺这一章
+    try:
+        await extract_state_after_save(db, row.book_id, chapter.number)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("保存后状态抽取失败（不影响正文）: %s", exc)
+
     db.refresh(chapter)
     return chapter
 
@@ -234,7 +244,13 @@ async def consistency(payload: ConsistencyRequest, db: Session = Depends(get_db)
     if not payload.source_text.strip():
         raise HTTPException(status_code=400, detail="请提供需要检查的正文")
     try:
-        return await check_consistency(db, payload.book_id, payload.source_text, payload.model)
+        return await check_consistency(
+            db,
+            payload.book_id,
+            payload.source_text,
+            payload.model,
+            provider_id=payload.provider_id,
+        )
     except ValueError as exc:
         raise _fail_400(exc) from exc
     except Exception as exc:  # noqa: BLE001

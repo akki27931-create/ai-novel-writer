@@ -10,6 +10,7 @@ import type {
   ChapterBrief,
   ChapterOut,
   ConsistencyResult,
+  ExtractStatesRequest,
   FanqieStatus,
   GenerateContext,
   GenerateRequest,
@@ -17,9 +18,14 @@ import type {
   Job,
   ModelInfo,
   ModelValidation,
+  OriginalBookRequest,
+  PlanChaptersRequest,
   PromptItem,
+  Provider,
+  ProviderList,
   FanqieSelftest,
   SettingsResponse,
+  StoryState,
   SystemInfo,
   StreamEvent,
   UsageSummary,
@@ -127,15 +133,47 @@ export const api = {
     bookId: number,
     body: {
       model?: string | null
+      provider_id?: number | null
       batch_size: number
       max_chapters?: number | null
       redo_summaries: boolean
+      with_states: boolean
       section: AnalyzeSection
     },
   ) => request<{ job_id: string; kind: string; message: string }>(`/api/books/${bookId}/analyze`, json(body)),
   startVectorize: (bookId: number, body: { force: boolean; max_chapters?: number | null }) =>
     request<{ job_id: string; kind: string; message: string }>(
       `/api/books/${bookId}/vectorize`,
+      json(body),
+    ),
+
+  // ---------------- 剧情状态层 ----------------
+  getStoryState: (bookId: number, upto?: number | null) =>
+    request<StoryState>(
+      `/api/books/${bookId}/state${upto ? `?upto=${upto}` : ''}`,
+    ),
+  extractStates: (bookId: number, body: ExtractStatesRequest) =>
+    request<{ job_id: string; kind: string; message: string }>(
+      `/api/books/${bookId}/state/extract`,
+      json(body),
+    ),
+  clearStoryState: (bookId: number, chapterNumber?: number | null) =>
+    request<{ book_id: number; removed: number }>(
+      `/api/books/${bookId}/state${chapterNumber ? `?chapter_number=${chapterNumber}` : ''}`,
+      { method: 'DELETE' },
+    ),
+
+  // ---------------- 从零原创 ----------------
+  createOriginalBook: (body: OriginalBookRequest) =>
+    request<{ job_id: string; kind: string; message: string }>('/api/books/original', json(body)),
+  planChapters: (bookId: number, body: PlanChaptersRequest) =>
+    request<{ job_id: string; kind: string; message: string }>(
+      `/api/books/${bookId}/plan-chapters`,
+      json(body),
+    ),
+  planChaptersSync: (bookId: number, body: PlanChaptersRequest) =>
+    request<{ book_id: number; count: number; planned: any[] }>(
+      `/api/books/${bookId}/plan-chapters/sync`,
       json(body),
     ),
 
@@ -156,8 +194,12 @@ export const api = {
     id: number,
     body: { title?: string; number?: number; replace_chapter_id?: number },
   ) => request<ChapterOut>(`/api/generations/${id}/save`, json(body)),
-  consistencyCheck: (body: { book_id: number; source_text: string; model?: string | null }) =>
-    request<ConsistencyResult>('/api/consistency-check', json(body)),
+  consistencyCheck: (body: {
+    book_id: number
+    source_text: string
+    model?: string | null
+    provider_id?: number | null
+  }) => request<ConsistencyResult>('/api/consistency-check', json(body)),
 
   // ---------------- 番茄 ----------------
   fanqieStatus: () => request<FanqieStatus>('/api/fanqie/status'),
@@ -180,13 +222,34 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
-  listModels: () => request<ModelInfo[]>('/api/settings/models'),
-  validateModels: () => request<ModelValidation>('/api/settings/validate'),
-  autofixModels: () =>
-    request<{ applied: Record<string, string>; settings: AppSettings }>(
-      '/api/settings/autofix-models',
+  listModels: (providerId?: number | null) =>
+    request<ModelInfo[]>(
+      `/api/settings/models${providerId ? `?provider_id=${providerId}` : ''}`,
+    ),
+  validateModels: (providerId?: number | null) =>
+    request<ModelValidation>(
+      `/api/settings/validate${providerId ? `?provider_id=${providerId}` : ''}`,
+    ),
+  autofixModels: (providerId?: number | null) =>
+    request<{ applied: Record<string, string>; settings: AppSettings; providers: Provider[] }>(
+      `/api/settings/autofix-models${providerId ? `?provider_id=${providerId}` : ''}`,
       json({}),
     ),
+
+  // ---------------- LLM 网关 ----------------
+  listProviders: () => request<ProviderList>('/api/providers'),
+  createProvider: (body: Partial<Provider> & { api_key?: string | null }) =>
+    request<Provider>('/api/providers', json(body)),
+  updateProvider: (id: number, body: Partial<Provider> & { api_key?: string | null }) =>
+    request<Provider>(`/api/providers/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  activateProvider: (id: number) =>
+    request<ProviderList>(`/api/providers/${id}/activate`, json({})),
+  deleteProvider: (id: number) =>
+    request<ProviderList>(`/api/providers/${id}`, { method: 'DELETE' }),
   getUsage: (limit = 20) => request<UsageSummary>(`/api/usage?limit=${limit}`),
   listPrompts: () => request<{ items: PromptItem[] }>('/api/prompts'),
   updatePrompt: (key: string, template: string) =>

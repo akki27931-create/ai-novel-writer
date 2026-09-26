@@ -414,9 +414,11 @@ function AnalysisPanel({
 
   const rerun = async () => {
     try {
+      // 只重跑某个板块时不动状态层：状态层有独立的补建入口
       const res = await api.startAnalyze(bookId, {
         batch_size: 8,
         redo_summaries: false,
+        with_states: false,
         section,
       })
       toast.info(res.message)
@@ -504,6 +506,7 @@ function AnalyzeModal({
   const [batchSize, setBatchSize] = useState(5)
   const [maxChapters, setMaxChapters] = useState<number | ''>('')
   const [redo, setRedo] = useState(false)
+  const [withStates, setWithStates] = useState(true)
   const [section, setSection] = useState<AnalyzeSection>('all')
   const [busy, setBusy] = useState(false)
 
@@ -515,6 +518,7 @@ function AnalyzeModal({
         batch_size: batchSize,
         max_chapters: maxChapters === '' ? null : Number(maxChapters),
         redo_summaries: redo,
+        with_states: withStates,
         section,
       })
       toast.info(res.message)
@@ -544,8 +548,8 @@ function AnalyzeModal({
     >
       <div className="space-y-3">
         <p className="rounded-lg border border-slate-800 bg-slate-950/50 p-2 text-xs text-slate-400">
-          流程：章节分块向量化 → 分批生成章节摘要（用正文模型）→ 全局拆书（用复杂任务模型）。
-          已生成的章节摘要会复用，不会重复计费。
+          流程：章节分块向量化 → 分批生成章节摘要（用正文模型）→ 全局拆书（用复杂任务模型）→
+          <b>建立剧情状态层</b>（用廉价模型）。已生成的章节摘要会复用，不会重复计费。
         </p>
         <div className="grid grid-cols-2 gap-3">
           <div>
@@ -597,6 +601,21 @@ function AnalyzeModal({
         <label className="flex items-center gap-2 text-sm text-slate-400">
           <input type="checkbox" checked={redo} onChange={(e) => setRedo(e.target.checked)} />
           强制重新生成全部章节摘要
+        </label>
+        <label className="flex items-start gap-2 text-sm text-slate-400">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={withStates}
+            onChange={(e) => setWithStates(e.target.checked)}
+          />
+          <span>
+            同时建立<b>剧情状态层</b>（推荐）
+            <span className="block text-[11px] text-slate-500">
+              给每一章记录「谁在哪、在做什么、手上有什么、知道什么」。没有它，续写只能靠上一章结尾
+              3000 字去猜，前后必然对不上。走廉价模型，量虽大但不贵。
+            </span>
+          </span>
         </label>
       </div>
     </Modal>

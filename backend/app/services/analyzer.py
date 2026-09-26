@@ -52,9 +52,23 @@ async def analyze_book(
     max_chapters: int | None = None,
     redo_summaries: bool = False,
     section: str = "all",
+    with_states: bool = True,
+    state_provider_id: int | None = None,
     report: ReportFn | None = None,
 ) -> dict[str, Any]:
-    report = report or _noop
+    """拆书全流程：向量化 → 分章摘要 → 全局拆书 → 剧情状态层。
+
+    with_states=True 时会额外给**原文**建立剧情状态层。
+    这一步是续写一致性的前提：没有它，续写第 N 章时就不知道
+    「上一章谁在哪、手上有什么」，只能靠 3000 字尾巴去猜。
+    """
+    outer = report or _noop
+    # 状态层占最后 28% 的进度
+    scaled = 0.72 if with_states else 1.0
+
+    def report(progress: float, message: str = "", done: int = 0, total: int = 0) -> None:
+        outer(progress * scaled, message, done, total)
+
     settings = get_settings(db, include_secrets=True)
     book = db.get(Book, book_id)
     if book is None:
@@ -191,7 +205,36 @@ async def analyze_book(
     analysis.raw = {"last_model_output": data, "model": result.model}
     book.analyzed = True
     db.commit()
-    report(1.0, "拆书完成", 1, 1)
+
+    states_result: dict[str, Any] | None = None
+    if with_states:
+        # ---------- 4. 剧情状态层 ----------
+        # 拆书产出的是「静态设定」（人物是谁、世界规则），
+        # 状态层产出的是「动态状态」（此刻在哪、在做什么、手上有什么）。
+        # 续写靠的是后者，所以这一步不能省。
+        from .state import ensure_states, seed_from_analysis
+
+        seed_from_analysis(db, book_id)
+
+        def on_state(progress: float, message: str = "", done: int = 0, total: int = 0) -> None:
+            outer(
+                0.72 + 0.28 * progress,
+                message or "正在建立剧情状态层…",
+                done,
+                total,
+            )
+
+        states_result = await ensure_states(
+            db,
+            book_id,
+            upto=max_chapters,
+            model=None,
+            provider_id=state_provider_id,
+            report=on_state,
+        )
+
+    # 用 outer 而不是 report：进度已经由状态层推到 1.0，再乘缩放系数会造成回退
+    outer(1.0, "拆书完成", 1, 1)
 
     return {
         "book_id": book_id,
@@ -202,6 +245,7 @@ async def analyze_book(
         "worldview": len(analysis.worldview or []),
         "timeline": len(analysis.timeline or []),
         "foreshadows": len(analysis.foreshadows or []),
+        "states": states_result or {},
         "model": result.model,
     }
 
@@ -250,6 +294,19 @@ def _collect_style_samples(chapters: list[Chapter], total_chars: int = 2800) -> 
     return "\n\n".join(blocks)
 
 
+def normalize_analysis_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """把模型输出的拆书 JSON 规范成 ORM 可写入的结构（供原创模式复用）。"""
+    return {
+        "synopsis": str(data.get("synopsis") or "").strip(),
+        "outline": data.get("outline") if isinstance(data.get("outline"), dict) else {},
+        "characters": _ensure_list(data.get("characters")),
+        "worldview": _ensure_list(data.get("worldview")),
+        "timeline": _ensure_list(data.get("timeline")),
+        "foreshadows": _ensure_list(data.get("foreshadows")),
+        "style": data.get("style") if isinstance(data.get("style"), dict) else {},
+    }
+
+
 def _apply_analysis(analysis: BookAnalysis, data: dict[str, Any], *, section: str) -> None:
     """把模型输出写回 ORM，同时做字段规范化。"""
     normalized = {
@@ -289,5 +346,16 @@ def _ensure_list(value: Any) -> list[Any]:
 async def analyze_section(
     db: Session, book_id: int, section: str, *, model: str | None = None
 ) -> dict[str, Any]:
-    """单独重跑某个板块（例如重新提取伏笔）。"""
-    return await analyze_book(db, book_id, model=model, section=section, redo_summaries=False)
+    """单独重跑某个板块（例如重新提取伏笔）。
+
+    不动剧情状态层：重跑单个板块通常只是修正静态设定，
+    状态层有自己独立的补建入口（/api/books/{id}/state/extract）。
+    """
+    return await analyze_book(
+        db,
+        book_id,
+        model=model,
+        section=section,
+        redo_summaries=False,
+        with_states=False,
+    )

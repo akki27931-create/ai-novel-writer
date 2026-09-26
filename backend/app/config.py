@@ -46,10 +46,10 @@ class EnvSettings(BaseSettings):
     # 例如：npx -y mcp-server-fanqie
     fanqie_mcp_command: str = ""
 
-    # 设置页模型下拉框的候选值（逗号分隔）
-    candidate_models: str = (
-        "deepseek-v4.1-flash,deepseek-v4.1-pro,deepseek-chat,deepseek-reasoner"
-    )
+    # 设置页模型下拉框的候选值（逗号分隔）。
+    # 默认故意留空：各家网关的模型名都不一样，预设一堆名字只会误导用户，
+    # 真正的候选值由「拉取可用模型」从网关实时取回。
+    candidate_models: str = ""
 
     # 番茄 MCP 依赖的第三方数据接口地址（该接口若变更/下线，可在此指向新的地址）
     fanqie_api_base: str = ""

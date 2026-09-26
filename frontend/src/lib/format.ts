@@ -35,6 +35,7 @@ const SOURCE_LABELS: Record<string, string> = {
   txt: 'TXT',
   epub: 'EPUB',
   manual: '手动',
+  original: '原创',
 }
 
 export function sourceLabel(source: string): string {

@@ -28,6 +28,7 @@ EMPTY = {
     "foreshadows": [],
     "style": {},
     "chapter_summaries": [],
+    "chapter_plan": [],
 }
 
 
@@ -44,6 +45,7 @@ def _serialize(book_id: int, analysis: BookAnalysis | None) -> AnalysisOut:
         foreshadows=analysis.foreshadows or [],
         style=analysis.style or {},
         chapter_summaries=analysis.chapter_summaries or [],
+        chapter_plan=analysis.chapter_plan or [],
         updated_at=analysis.updated_at,
     )
 
@@ -81,7 +83,7 @@ def update_analysis(
 async def start_analyze(
     book_id: int, payload: AnalyzeRequest, db: Session = Depends(get_db)
 ) -> dict[str, object]:
-    """启动拆书后台任务（向量化 + 分章摘要 + 全局拆书）。
+    """启动拆书后台任务（向量化 + 分章摘要 + 全局拆书 + 剧情状态层）。
 
     必须是 async 端点：后台任务用 asyncio.create_task 调度，同步端点跑在线程池里没有事件循环。
     """
@@ -94,6 +96,7 @@ async def start_analyze(
     async def runner(job, report):  # noqa: ANN001, ANN202
         session = SessionLocal()
         try:
+            # analyze_book 内部已包含「剧情状态层」阶段（占最后 28% 进度）
             return await analyze_book(
                 session,
                 book_id,
@@ -102,13 +105,19 @@ async def start_analyze(
                 max_chapters=options.get("max_chapters"),
                 redo_summaries=bool(options.get("redo_summaries")),
                 section=str(options.get("section") or "all"),
+                with_states=bool(options.get("with_states", True)),
+                state_provider_id=options.get("provider_id"),
                 report=report,
             )
         finally:
             session.close()
 
     job = jobs.create("analyze", runner)
-    return {"job_id": job.id, "kind": job.kind, "message": "拆书任务已启动"}
+    return {
+        "job_id": job.id,
+        "kind": job.kind,
+        "message": "拆书任务已启动（含剧情状态层建立）",
+    }
 
 
 @router.post("/{book_id}/vectorize")
