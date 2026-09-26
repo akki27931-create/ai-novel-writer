@@ -14,7 +14,9 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import logging
 import os
 import re
 import shutil
@@ -1274,8 +1276,57 @@ def main() -> int:
         print(f"  - 失败：{item}")
     print("=" * 70)
 
-    shutil.rmtree(TMP_DATA, ignore_errors=True)
+    cleanup_tmp_data()
     return 1 if FAILED else 0
+
+
+def cleanup_tmp_data() -> None:
+    """删除本次运行用的临时数据目录。
+
+    注意：Windows 下 SQLite 的 WAL 文件和连接池会一直占着文件句柄，
+    直接 rmtree 会失败。旧版写的是 rmtree(..., ignore_errors=True)，
+    把失败静默吞掉，结果每跑一次就在 %TEMP% 里漏一个 novel-smoke-* 目录。
+    这里先把引擎和向量库的句柄释放掉，再重试；仍然失败就明确报出来。
+    """
+    # 1) 释放 SQLite 连接池
+    try:
+        from app.database import engine
+
+        engine.dispose()
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 2) 释放向量库单例（它会缓存文件路径与内存索引）
+    try:
+        from app.services.indexing import reset_store_cache
+
+        reset_store_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 3) 关掉日志文件句柄 —— main.py 启动时会往 <临时目录>/logs/app.log
+    #    挂一个 FileHandler，进程存活期间它一直开着，Windows 上就删不掉目录。
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if isinstance(handler, logging.FileHandler):
+            try:
+                handler.close()
+            except Exception:  # noqa: BLE001
+                pass
+            root.removeHandler(handler)
+
+    # 4) Windows 上句柄是延迟释放的，多试几次
+    for attempt in range(5):
+        gc.collect()
+        try:
+            shutil.rmtree(TMP_DATA)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            time.sleep(0.3 * (attempt + 1))
+
+    print(f"[提示] 临时数据目录没能删掉（多半是文件仍被占用），可手动清理：{TMP_DATA}")
 
 
 if __name__ == "__main__":
