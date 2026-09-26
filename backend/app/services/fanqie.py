@@ -111,7 +111,7 @@ class MCPStdioSession:
                 {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "clientInfo": {"name": "local-novel-ai", "version": "0.1.0"},
+                    "clientInfo": {"name": "local-novel-ai", "version": "0.2.0"},
                 },
             )
             await self._notify("notifications/initialized", {})
